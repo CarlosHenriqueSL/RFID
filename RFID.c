@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdbool.h>
 
+
 #define I2C_PORT i2c1
 #define I2C_SDA 14
 #define I2C_SCL 15
@@ -14,38 +15,44 @@
 #define LED_BLUE 12
 #define LED_GREEN 13
 
-// Botões para interação (ativos low com pull-up)
-#define BTN_NEXT 5
-#define BTN_SELECT 6
+#define BUTTON_A 5
+#define BUTTON_B 6
 
-#define MAX_KNOWN 8
+// Numero maximo de UIDs
+#define MAX_CONHECIDOS 8
 #define MAX_UID_STRLEN 24
 
-static char known_uids[MAX_KNOWN][MAX_UID_STRLEN];
-static int known_count = 0;
-static char last_uid[MAX_UID_STRLEN] = "";
+// Vetor que guarda as strings dos UIDs conhecidos
+static char uids_conhecidos[MAX_CONHECIDOS][MAX_UID_STRLEN];
+// Quantos UIDs estao atualmente armazenados
+static int total_conhecidos = 0;
+// ultimo UID lido
+static char ultimo_uid[MAX_UID_STRLEN] = "";
 
-static const char *menu_items[] = {"Scan card", "Add UID", "Remove UID", "List UIDs", "Toggle inv"};
-static const int menu_len = sizeof(menu_items) / sizeof(menu_items[0]);
+// Menu do sistema (texto exibido no OLED)
+static const char *itens_menu[] = {"Ler cartao", "Adicionar UID", "Remover UID", "Listar UIDs", "Inverter"};
+static const int tamanho_menu = sizeof(itens_menu) / sizeof(itens_menu[0]);
 
-static bool btn_pressed(uint pin);
-static void oled_show_menu(ssd1306_t *ssd, int sel, bool invert);
-static bool scan_card(MFRC522Ptr_t mfrc, ssd1306_t *ssd);
-static bool add_known_uid(const char *uid);
-static bool remove_known_uid(const char *uid);
-static void list_known_on_oled(ssd1306_t *ssd);
+// Prototipos de funcoes 
+static bool botao_pressionado(uint pin);
+static void menu_oled(ssd1306_t *ssd, int sel, bool invert);
+static bool escanear_cartao(MFRC522Ptr_t mfrc, ssd1306_t *ssd);
+static bool add_uid(const char *uid);
+static bool remove_uid(const char *uid);
+static void listar_uids(ssd1306_t *ssd);
 
+// Funcao principal
 void main()
 {
     stdio_init_all();
 
-    // Inicializa o RFID
+    // Inicializacao do leitor RFID 
     MFRC522Ptr_t mfrc = MFRC522_Init();
     PCD_Init(mfrc, spi0);
-    PCD_AntennaOn(mfrc); // Liga antena
-    sleep_ms(500);
+    PCD_AntennaOn(mfrc);
+    sleep_ms(500); 
 
-    // Inicializa display
+    // Inicializacao do display OLED via I2C 
     i2c_init(I2C_PORT, 400 * 1000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
@@ -57,6 +64,7 @@ void main()
     ssd1306_fill(&ssd, false);
     ssd1306_send_data(&ssd);
 
+    // Inicializa LEDs 
     gpio_init(LED_BLUE);
     gpio_set_dir(LED_BLUE, GPIO_OUT);
     gpio_put(LED_BLUE, 0);
@@ -64,98 +72,102 @@ void main()
     gpio_set_dir(LED_GREEN, GPIO_OUT);
     gpio_put(LED_GREEN, 0);
 
-    gpio_init(BTN_NEXT);
-    gpio_set_dir(BTN_NEXT, GPIO_IN);
-    gpio_pull_up(BTN_NEXT);
+    // Inicializa botoes
+    gpio_init(BUTTON_A);
+    gpio_set_dir(BUTTON_A, GPIO_IN);
+    gpio_pull_up(BUTTON_A);
 
-    gpio_init(BTN_SELECT);
-    gpio_set_dir(BTN_SELECT, GPIO_IN);
-    gpio_pull_up(BTN_SELECT);
+    gpio_init(BUTTON_B);
+    gpio_set_dir(BUTTON_B, GPIO_IN);
+    gpio_pull_up(BUTTON_B);
 
-    bool invert = false;
-    int sel = 0;
+    bool invert = false; // inverte cores do OLED quando true
+    int sel = 0; // item selecionado
 
-    for (;;)
+    while(true)
     {
+        // Desenha a tela principal do menu
         ssd1306_fill(&ssd, !invert);
-        ssd1306_draw_string(&ssd, "RFID MENU", 20, 0);
+        ssd1306_draw_string(&ssd, "MENU RFID", 20, 0);
         // mostra item selecionado com marcador
         char line[20];
-        snprintf(line, sizeof(line), "> %s", menu_items[sel]);
+        snprintf(line, sizeof(line), "> %s", itens_menu[sel]);
         ssd1306_draw_string(&ssd, line, 0, 24);
 
-        if (last_uid[0])
+        // Mostra o ultimo UID lido, se houver
+        if (ultimo_uid[0])
         {
-            ssd1306_draw_string(&ssd, "Last:", 0, 40);
-            ssd1306_draw_string(&ssd, last_uid, 0, 52);
+            ssd1306_draw_string(&ssd, "ultimo:", 0, 40);
+            ssd1306_draw_string(&ssd, ultimo_uid, 0, 52);
         }
         else
         {
-            ssd1306_draw_string(&ssd, "No UID read", 0, 52);
+            ssd1306_draw_string(&ssd, "Nenhum UID lido", 0, 52);
         }
         ssd1306_send_data(&ssd);
 
-        // navega com NEXT, seleciona com SELECT
-        if (btn_pressed(BTN_NEXT))
+        // Navegacao: BUTTON_A avanca, BUTTON_B executa
+        if (botao_pressionado(BUTTON_A))
         {
-            sel = (sel + 1) % menu_len;
-            oled_show_menu(&ssd, sel, invert);
+            sel = (sel + 1) % tamanho_menu;
+            menu_oled(&ssd, sel, invert);
         }
 
-        if (btn_pressed(BTN_SELECT))
+        if (botao_pressionado(BUTTON_B))
         {
-            // executa ação
+            // Executa acao dependendo do item selecionado
             switch (sel)
             {
-            case 0: // Scan
-                scan_card(mfrc, &ssd);
+            case 0: // Scan — espera e le um cartao
+                escanear_cartao(mfrc, &ssd);
                 break;
-            case 1: // Add last_uid
-                if (last_uid[0])
+            case 1: // Add ultimo_uid — adiciona o ultimo UID lido a lista de conhecidos
+                if (ultimo_uid[0])
                 {
-                    bool ok = add_known_uid(last_uid);
+                    bool ok = add_uid(ultimo_uid);
                     ssd1306_fill(&ssd, false);
                     if (ok)
-                        ssd1306_draw_string(&ssd, "UID added", 16, 28);
+                        ssd1306_draw_string(&ssd, "UID adicionado", 8, 28);
                     else
-                        ssd1306_draw_string(&ssd, "Add failed", 12, 28);
+                        ssd1306_draw_string(&ssd, "Falha ao adicionar", 4, 28);
+                    ssd1306_send_data(&ssd);
+                    sleep_ms(800);
+                }
+                else
+                {
+                    // Nao ha UID para adicionar
+                    ssd1306_fill(&ssd, false);
+                    ssd1306_draw_string(&ssd, "Nenhum UID para adicionar", 0, 28);
+                    ssd1306_send_data(&ssd);
+                    sleep_ms(800);
+                }
+                break;
+            case 2: // Remove ultimo_uid — remove o ultimo UID lido da lista de conhecidos
+                if (ultimo_uid[0])
+                {
+                    bool ok = remove_uid(ultimo_uid);
+                    ssd1306_fill(&ssd, false);
+                    if (ok)
+                        ssd1306_draw_string(&ssd, "UID removido", 8, 28);
+                    else
+                        ssd1306_draw_string(&ssd, "Falha ao remover", 4, 28);
                     ssd1306_send_data(&ssd);
                     sleep_ms(800);
                 }
                 else
                 {
                     ssd1306_fill(&ssd, false);
-                    ssd1306_draw_string(&ssd, "No UID to add", 4, 28);
+                    ssd1306_draw_string(&ssd, "Nenhum UID para remover", 0, 28);
                     ssd1306_send_data(&ssd);
                     sleep_ms(800);
                 }
                 break;
-            case 2: // Remove last_uid
-                if (last_uid[0])
-                {
-                    bool ok = remove_known_uid(last_uid);
-                    ssd1306_fill(&ssd, false);
-                    if (ok)
-                        ssd1306_draw_string(&ssd, "UID removed", 12, 28);
-                    else
-                        ssd1306_draw_string(&ssd, "Remove fail", 12, 28);
-                    ssd1306_send_data(&ssd);
-                    sleep_ms(800);
-                }
-                else
-                {
-                    ssd1306_fill(&ssd, false);
-                    ssd1306_draw_string(&ssd, "No UID to rm", 8, 28);
-                    ssd1306_send_data(&ssd);
-                    sleep_ms(800);
-                }
+            case 3: // List — percorre e mostra UIDs conhecidos no OLED
+                listar_uids(&ssd);
                 break;
-            case 3: // List
-                list_known_on_oled(&ssd);
-                break;
-            case 4: // Toggle invert
+            case 4: // Toggle invert — inverte as cores do OLED
                 invert = !invert;
-                oled_show_menu(&ssd, sel, invert);
+                menu_oled(&ssd, sel, invert);
                 break;
             }
         }
@@ -164,27 +176,16 @@ void main()
     }
 }
 
-static void gpio_setup_buttons(void)
-{
-    gpio_init(BTN_NEXT);
-    gpio_set_dir(BTN_NEXT, GPIO_IN);
-    gpio_pull_up(BTN_NEXT);
+// botao_pressionado: detecta um pressionamento, com debounce.
 
-    gpio_init(BTN_SELECT);
-    gpio_set_dir(BTN_SELECT, GPIO_IN);
-    gpio_pull_up(BTN_SELECT);
-}
-
-static bool btn_pressed(uint pin)
+static bool botao_pressionado(uint pin)
 {
-    // ativo baixo
     if (!gpio_get(pin))
     {
         // debounce simples
         sleep_ms(20);
         if (!gpio_get(pin))
         {
-            // espera soltar
             while (!gpio_get(pin))
                 sleep_ms(10);
             return true;
@@ -193,104 +194,114 @@ static bool btn_pressed(uint pin)
     return false;
 }
 
+// find_known_uid: procura um UID ja armazenado e retorna o indice
 static int find_known_uid(const char *uid)
 {
-    for (int i = 0; i < known_count; ++i)
+    for (int i = 0; i < total_conhecidos; ++i)
     {
-        if (strcmp(known_uids[i], uid) == 0)
+        if (strcmp(uids_conhecidos[i], uid) == 0)
             return i;
     }
     return -1;
 }
 
-static bool add_known_uid(const char *uid)
+// add_uid: adiciona um UID a lista de conhecidos
+static bool add_uid(const char *uid)
 {
     if (!uid || uid[0] == '\0')
         return false;
     if (find_known_uid(uid) >= 0)
-        return false;
-    if (known_count >= MAX_KNOWN)
-        return false;
-    strncpy(known_uids[known_count], uid, MAX_UID_STRLEN - 1);
-    known_uids[known_count][MAX_UID_STRLEN - 1] = '\0';
-    known_count++;
+        return false; // ja existe
+    if (total_conhecidos >= MAX_CONHECIDOS)
+        return false; // lista cheia
+    // Copia a string (garante terminacao)
+    strncpy(uids_conhecidos[total_conhecidos], uid, MAX_UID_STRLEN - 1);
+    uids_conhecidos[total_conhecidos][MAX_UID_STRLEN - 1] = '\0';
+    total_conhecidos++;
     return true;
 }
 
-static bool remove_known_uid(const char *uid)
+// remove_uid: remove um UID da lista conhecida
+static bool remove_uid(const char *uid)
 {
     int idx = find_known_uid(uid);
     if (idx < 0)
-        return false;
-    for (int i = idx; i < known_count - 1; ++i)
+        return false; // nao encontrado
+    for (int i = idx; i < total_conhecidos - 1; ++i)
     {
-        strncpy(known_uids[i], known_uids[i + 1], MAX_UID_STRLEN);
+        // copia a proxima entrada para a atual
+        strncpy(uids_conhecidos[i], uids_conhecidos[i + 1], MAX_UID_STRLEN);
     }
-    known_count--;
-    known_uids[known_count][0] = '\0';
+    total_conhecidos--;
+    // limpa a ultima posicao para evitar residuos
+    uids_conhecidos[total_conhecidos][0] = '\0';
     return true;
 }
 
-static void oled_show_menu(ssd1306_t *ssd, int sel, bool invert)
+// menu_oled: desenha a tela do menu no OLED
+static void menu_oled(ssd1306_t *ssd, int sel, bool invert)
 {
     ssd1306_fill(ssd, !invert);
-    ssd1306_draw_string(ssd, "RFID MENU", 20, 0);
+    ssd1306_draw_string(ssd, "MENU RFID", 20, 0);
     // mostra item selecionado com marcador
     char line[20];
-    snprintf(line, sizeof(line), "> %s", menu_items[sel]);
+    snprintf(line, sizeof(line), "> %s", itens_menu[sel]);
     ssd1306_draw_string(ssd, line, 0, 24);
 
-    if (last_uid[0])
+    if (ultimo_uid[0])
     {
-        ssd1306_draw_string(ssd, "Last:", 0, 40);
-        ssd1306_draw_string(ssd, last_uid, 0, 52);
+        ssd1306_draw_string(ssd, "ultimo:", 0, 40);
+        ssd1306_draw_string(ssd, ultimo_uid, 0, 52);
     }
     else
     {
-        ssd1306_draw_string(ssd, "No UID read", 0, 52);
+        ssd1306_draw_string(ssd, "Nenhum UID lido", 0, 52);
     }
     ssd1306_send_data(ssd);
 }
 
-// Espera e lê um cartão; retorna true se leu e preenche last_uid
-static bool scan_card(MFRC522Ptr_t mfrc, ssd1306_t *ssd)
+// escanear_cartao: espera por um cartao e le seu UID
+static bool escanear_cartao(MFRC522Ptr_t mfrc, ssd1306_t *ssd)
 {
     ssd1306_fill(ssd, false);
-    ssd1306_draw_string(ssd, "Scanning...", 10, 24);
+    ssd1306_draw_string(ssd, "Lendo...", 20, 24);
     ssd1306_send_data(ssd);
 
-    // aguarda novo cartão
-    for (;;)
+    // aguarda novo cartao ser apresentado
+    while(true)
     {
         if (PICC_IsNewCardPresent(mfrc))
             break;
         sleep_ms(100);
     }
 
+    // tenta ler o cartao; se falhar, informa no OLED
     if (!PICC_ReadCardSerial(mfrc))
     {
         ssd1306_fill(ssd, true);
-        ssd1306_draw_string(ssd, "Read fail", 20, 28);
+        ssd1306_draw_string(ssd, "Falha na leitura", 4, 28);
         ssd1306_send_data(ssd);
         sleep_ms(800);
         return false;
     }
 
-    // formata UID
+    // Formata o UID lido em ultimo_uid como hex com espacos: "AA BB CC DD "
     int offset = 0;
-    memset(last_uid, 0, sizeof(last_uid));
-    for (int i = 0; i < mfrc->uid.size && offset < (int)sizeof(last_uid) - 4; ++i)
+    memset(ultimo_uid, 0, sizeof(ultimo_uid));
+    // Protege para nao escrever alem do buffer
+    for (int i = 0; i < mfrc->uid.size && offset < (int)sizeof(ultimo_uid) - 4; ++i)
     {
-        offset += sprintf(&last_uid[offset], "%02X ", mfrc->uid.uidByte[i]);
+        // sprintf retorna o numero de caracteres escritos
+        offset += sprintf(&ultimo_uid[offset], "%02X ", mfrc->uid.uidByte[i]);
     }
 
-    // mostra no OLED
+    // mostra no OLED o UID lido
     ssd1306_fill(ssd, false);
-    ssd1306_draw_string(ssd, "Card read:", 0, 24);
-    ssd1306_draw_string(ssd, last_uid, 0, 40);
+    ssd1306_draw_string(ssd, "Cartao lido:", 0, 24);
+    ssd1306_draw_string(ssd, ultimo_uid, 0, 40);
     ssd1306_send_data(ssd);
 
-    // feedback: pisca LED
+    // feedback: pisca LED para indicar leitura bem-sucedida
     gpio_put(LED_BLUE, 1);
     sleep_ms(150);
     gpio_put(LED_BLUE, 0);
@@ -298,38 +309,39 @@ static bool scan_card(MFRC522Ptr_t mfrc, ssd1306_t *ssd)
     return true;
 }
 
-static void list_known_on_oled(ssd1306_t *ssd)
+// listar_uids: exibe, um a um, os UIDs armazenados
+static void listar_uids(ssd1306_t *ssd)
 {
-    if (known_count == 0)
+    if (total_conhecidos == 0)
     {
         ssd1306_fill(ssd, false);
-        ssd1306_draw_string(ssd, "Known UIDs:", 0, 24);
-        ssd1306_draw_string(ssd, "(none)", 0, 40);
+        ssd1306_draw_string(ssd, "UIDs conhecidos:", 0, 24);
+        ssd1306_draw_string(ssd, "(nenhum)", 0, 40);
         ssd1306_send_data(ssd);
         sleep_ms(1000);
         return;
     }
 
     int idx = 0;
-    for (;;)
+    while(true)
     {
         ssd1306_fill(ssd, false);
-        ssd1306_draw_string(ssd, "Known UIDs:", 0, 0);
-        ssd1306_draw_string(ssd, known_uids[idx], 0, 24);
+        ssd1306_draw_string(ssd, "UIDs conhecidos:", 0, 0);
+        ssd1306_draw_string(ssd, uids_conhecidos[idx], 0, 24);
         char buf[20];
-        snprintf(buf, sizeof(buf), "%d/%d", idx + 1, known_count);
+        snprintf(buf, sizeof(buf), "%d/%d", idx + 1, total_conhecidos);
         ssd1306_draw_string(ssd, buf, 96, 0);
         ssd1306_send_data(ssd);
 
-        // espera ação: next avança, select volta ao menu
+        // espera acao: BUTTON_A avanca, BUTTON_B volta ao menu
         while (true)
         {
-            if (btn_pressed(BTN_SELECT))
+            if (botao_pressionado(BUTTON_B))
                 return; // volta ao menu
-            if (btn_pressed(BTN_NEXT))
-                break;    // mostra próximo
+            if (botao_pressionado(BUTTON_A))
+                break;    // mostra proximo
             sleep_ms(50);
         }
-        idx = (idx + 1) % known_count;
+        idx = (idx + 1) % total_conhecidos;
     }
 }
